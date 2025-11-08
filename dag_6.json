@@ -1,0 +1,63 @@
+{
+  "capacity": { "CPU": 8, "RAM": 64 },
+  "targets": ["deploy"],
+  "nodes": [
+    {
+      "id": "fetch_headers",
+      "deps": [],
+      "action": {
+        "type": "shell",
+        "cmd": "echo Fetching headers... && timeout 1"
+      },
+      "outputs": [],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "compile_a",
+      "deps": ["fetch_headers"],
+      "action": {
+        "type": "shell",
+        "cmd": "echo Compiling module A... && timeout 10"
+      },
+      "outputs": ["a.o"],
+      "resources": { "CPU": 2, "RAM": 2 }
+    },
+    {
+      "id": "compile_b",
+      "deps": ["fetch_headers"],
+      "action": {
+        "type": "shell",
+        "cmd": "echo Compiling module B... && timeout 15"
+      },
+      "outputs": ["b.o"],
+      "resources": { "CPU": 2, "RAM": 2 }
+    },
+    {
+      "id": "link",
+      "deps": ["compile_a", "compile_b"],
+      "action": {
+        "type": "shell",
+        "cmd": "echo Linking executable... && timeout 2"
+      },
+      "outputs": ["app"],
+      "resources": { "CPU": 3, "RAM": 4 }
+    },
+    {
+      "id": "test",
+      "deps": ["link"],
+      "action": {
+        "type": "shell",
+        "cmd": "echo Running tests... && timeout 1"
+      },
+      "outputs": ["results.txt"],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "deploy",
+      "deps": ["test"],
+      "action": { "type": "shell", "cmd": "echo Deploying to server..." },
+      "outputs": [],
+      "resources": { "CPU": 1, "RAM": 2 }
+    }
+  ]
+}

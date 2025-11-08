@@ -1,0 +1,53 @@
+{
+  "capacity": {
+    "CPU": 4,
+    "RAM": 32
+  },
+  "targets": ["all", "moduleA", "moduleB"],
+  "nodes": [
+    {
+      "id": "compile_a",
+      "deps": ["fetch_headers"],
+      "action": {
+        "type": "shell",
+        "cmd": "gcc -c src/a.c -o build/a.o"
+      },
+      "outputs": ["build/a.o"],
+      "resources": {
+        "CPU": 2,
+        "RAM": 1
+      }
+    },
+    {
+      "id": "compile_b",
+      "deps": ["fetch_headers"],
+      "action": {
+        "type": "shell",
+        "cmd": "gcc -c src/b.c -o build/b.o"
+      },
+      "outputs": ["build/b.o"],
+      "resources": {
+        "CPU": 4,
+        "RAM": 0.5
+      }
+    },
+    {
+      "id": "moduleA",
+      "deps": ["compile_a"],
+      "action": null,
+      "outputs": []
+    },
+    {
+      "id": "moduleB",
+      "deps": ["compile_b"],
+      "action": null,
+      "outputs": []
+    },
+    {
+      "id": "all",
+      "deps": ["moduleA", "moduleB"],
+      "action": null,
+      "outputs": []
+    }
+  ]
+}

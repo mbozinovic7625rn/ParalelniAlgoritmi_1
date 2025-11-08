@@ -1,0 +1,33 @@
+{
+  "capacity": { "CPU": 4, "RAM": 16 },
+  "targets": ["final"],
+  "nodes": [
+    {
+      "id": "download",
+      "deps": [],
+      "action": { "type": "shell", "cmd": "wget data.zip" },
+      "outputs": ["data.zip"],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "extract",
+      "deps": ["download"],
+      "action": { "type": "shell", "cmd": "unzip data.zip -d data" },
+      "outputs": ["data/"],
+      "resources": { "CPU": 2, "RAM": 2 }
+    },
+    {
+      "id": "process",
+      "deps": ["extract"],
+      "action": { "type": "shell", "cmd": "python process_data.py" },
+      "outputs": ["processed/"],
+      "resources": { "CPU": 2, "RAM": 4 }
+    },
+    {
+      "id": "final",
+      "deps": ["process"],
+      "action": null,
+      "outputs": []
+    }
+  ]
+}

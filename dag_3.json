@@ -1,0 +1,26 @@
+{
+  "capacity": { "CPU": 2, "RAM": 4 },
+  "targets": ["all"],
+  "nodes": [
+    {
+      "id": "step1",
+      "deps": [],
+      "action": { "type": "shell", "cmd": "echo Step 1 running..." },
+      "outputs": ["out/step1.txt"],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "step2",
+      "deps": [],
+      "action": { "type": "shell", "cmd": "echo Step 2 running..." },
+      "outputs": ["out/step2.txt"],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "all",
+      "deps": ["step1", "step2"],
+      "action": null,
+      "outputs": []
+    }
+  ]
+}

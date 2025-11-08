@@ -1,0 +1,33 @@
+{
+  "capacity": { "CPU": 8, "RAM": 32 },
+  "targets": ["app"],
+  "nodes": [
+    {
+      "id": "prepare_env",
+      "deps": [],
+      "action": { "type": "shell", "cmd": "echo Preparing env..." },
+      "outputs": [],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "build_frontend",
+      "deps": ["prepare_env"],
+      "action": { "type": "shell", "cmd": "npm run build" },
+      "outputs": ["dist/"],
+      "resources": { "CPU": 4, "RAM": 4 }
+    },
+    {
+      "id": "build_backend",
+      "deps": ["prepare_env"],
+      "action": { "type": "shell", "cmd": "python manage.py build" },
+      "outputs": ["api/"],
+      "resources": { "CPU": 4, "RAM": 4 }
+    },
+    {
+      "id": "app",
+      "deps": ["build_frontend", "build_backend"],
+      "action": null,
+      "outputs": []
+    }
+  ]
+}

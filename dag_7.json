@@ -1,0 +1,40 @@
+{
+  "capacity": { "CPU": 4, "RAM": 16 },
+  "targets": ["all"],
+  "nodes": [
+    {
+      "id": "prepare",
+      "deps": [],
+      "action": { "type": "shell", "cmd": "echo Preparing..." },
+      "outputs": ["tmp/prepare.log"],
+      "resources": { "CPU": 1, "RAM": 1 }
+    },
+    {
+      "id": "compile_ok",
+      "deps": ["prepare"],
+      "action": { "type": "shell", "cmd": "echo Compiling OK..." },
+      "outputs": ["build/ok.o"],
+      "resources": { "CPU": 2, "RAM": 1 }
+    },
+    {
+      "id": "compile_fail",
+      "deps": ["prepare"],
+      "action": { "type": "shell", "cmd": "exit 1" },
+      "outputs": ["build/fail.o"],
+      "resources": { "CPU": 2, "RAM": 1 }
+    },
+    {
+      "id": "link",
+      "deps": ["compile_ok", "compile_fail"],
+      "action": { "type": "shell", "cmd": "gcc build/*.o -o app" },
+      "outputs": ["app"],
+      "resources": { "CPU": 2, "RAM": 2 }
+    },
+    {
+      "id": "all",
+      "deps": ["link"],
+      "action": null,
+      "outputs": []
+    }
+  ]
+}
