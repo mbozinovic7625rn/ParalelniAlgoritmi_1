@@ -7,6 +7,8 @@
 
 ### Mihailo Božinović RN 76/2025
 
+### Luka Ljubičić SI 98/2024
+
 Nije uradjeno:
 
 - Bonus zadatak za ProcessPool
