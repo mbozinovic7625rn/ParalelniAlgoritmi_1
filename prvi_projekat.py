@@ -2,6 +2,7 @@ import json
 from threading import Thread, Event, Condition, Lock
 from queue import Queue, Empty
 import subprocess as sp
+import multiprocessing as mp
 import time
 
 globalGraph = None
@@ -414,6 +415,166 @@ class Future:
         return self._done.is_set()
 
 
+
+def _execute_node_process_safe(arg0):
+   
+    if isinstance(arg0, dict):
+        node_id = arg0.get("id")
+        act = arg0.get("action")
+    else:
+        
+        node_id = getattr(arg0, "id", None)
+        act = getattr(arg0, "action", None)
+
+    if not act:
+        time.sleep(0.1)
+        return f"[OK] Node {node_id} has no action (meta-node)."
+
+    typ, cmd = act.get("type"), act.get("cmd")
+
+    if not typ or not cmd:
+        raise RuntimeError(f"Node {node_id} has invalid action!")
+
+    try:
+        if typ == "shell":
+            res = sp.run(
+                cmd,
+                shell=True,
+                check=True,
+                stdout=sp.PIPE,
+                stderr=sp.PIPE,
+                text=True,
+            )
+            return f"[OK] Node {node_id} (shell) -> {res.stdout.strip()}"
+        elif typ == "py":
+            exec(cmd, {}, {})
+            return f"[OK] Node {node_id} (python) -> Completed"
+        else:
+            raise ValueError(f"Unknown action type: {typ}")
+    except sp.CalledProcessError as e:
+        raise RuntimeError(
+            f"Command failed for node {node_id}: {e.stderr or str(e)}"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Execution error in node {node_id}: {e}")
+
+
+class MyProcessPool:
+    def __init__(self, num_processes):
+        self.num_processes = num_processes
+        
+        self._pool = mp.Pool(processes=num_processes)
+        self._lock = Lock()
+        self._closed = False
+        self._active_count = 0
+        self._pending = set()  
+
+    def _inc_active(self):
+        with self._lock:
+            self._active_count += 1
+
+    def _dec_active(self):
+        with self._lock:
+            self._active_count -= 1
+
+    def apply_async(
+        self,
+        func,
+        args=(),
+        callback=None,
+        callback_args=None,
+        err_callback=None,
+        err_args=None,
+    ):
+        if self.is_closed():
+            raise RuntimeError("Process pool is closed.")
+
+        
+        call_func = func
+        call_args = args
+        try:
+            
+            if getattr(func, "__name__", None) == "execute_node" and args:
+                node_obj = args[0]
+                
+                payload = {
+                    "id": getattr(node_obj, "id", None),
+                    "action": getattr(node_obj, "action", None),
+                }
+                call_func = _execute_node_process_safe
+                call_args = (payload,)
+        except Exception:
+            pass
+
+        fut = Future()
+
+        holder = {}
+
+        def _on_success(res):
+            try:
+                fut.set_result(res)
+                if callback:
+                    callback(res, *(callback_args or ()))
+            finally:
+                with self._lock:
+                    ar_local = holder.get("ar")
+                    if ar_local is not None:
+                        self._pending.discard(ar_local)
+                self._dec_active()
+
+        def _on_error(err):
+            try:
+                fut.set_exception(err)
+                if err_callback:
+                    err_callback(err, *(err_args or ()))
+            finally:
+                with self._lock:
+                    ar_local = holder.get("ar")
+                    if ar_local is not None:
+                        self._pending.discard(ar_local)
+                self._dec_active()
+
+        self._inc_active()
+        ar = self._pool.apply_async(
+            call_func,
+            args=call_args,
+            callback=_on_success,
+            error_callback=_on_error,
+        )
+        with self._lock:
+            self._pending.add(ar)
+        holder["ar"] = ar
+
+        return fut
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+        self._pool.close()
+
+    def is_closed(self):
+        with self._lock:
+            return self._closed
+
+    def num_active(self):
+        with self._lock:
+            return self._active_count
+
+    def join(self):
+        self._pool.join()
+
+    def terminate(self):
+        with self._lock:
+            self._closed = True
+            pending = list(self._pending)
+            self._pending.clear()
+
+        
+        self._pool.terminate()
+
+       
+
+
 def load_graph(path: str, messageQueue: Queue):
     global globalGraph
 
@@ -530,8 +691,9 @@ def handle_command(command: str, messageQueue: Queue):
                 rafThreadPool.terminate()
                 rafThreadPool.close()
                 rafThreadPool.join()
-                rafThreadPool = RafThreadPool(4)
-                messageQueue.put("A new RafThreadPool has been successfully created!")
+                #rafThreadPool = RafThreadPool(4)
+                rafThreadPool = MyProcessPool(4)
+                messageQueue.put("A new MyProcessPool has been successfully created!")
 
         elif command == "exit":
             if rafThreadPool.num_active() > 0:
@@ -555,7 +717,8 @@ def main():
     global globalGraph, rafThreadPool
 
     globalGraph = None
-    rafThreadPool = RafThreadPool(4)
+    #rafThreadPool = RafThreadPool(4)
+    rafThreadPool = MyProcessPool(4)
 
     while True:
         try:
