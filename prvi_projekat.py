@@ -1,53 +1,54 @@
-from threading import Lock,Thread,Condition,Event
-from queue import Queue,Empty
+from threading import Lock, Thread, Condition, Event
+from queue import Queue, Empty
 import time
 import json
 import subprocess as sp
 import multiprocessing as mp
 
-globalGraph=None
-rafThreadPool=None
-activePlaners=[]
-planersLock=Lock()
-plannerCondition=Condition()
+globalGraph = None
+rafThreadPool = None
+activePlaners = []
+planersLock = Lock()
+plannerCondition = Condition()
+
 
 class Node:
-    def __init__(self,id:str,deps,action,outputs,resources:dict):
-        self.id=id
-        self.deps=deps
-        self.action=action
-        self.outputs=outputs
-        self.resources=resources
-        self._state="PENDING"
-        self._last_error=None
-        self._num_deps=len(deps)
-        self.lock=Lock()
+    def __init__(self, id: str, deps, action, outputs, resources: dict):
+        self.id = id
+        self.deps = deps
+        self.action = action
+        self.outputs = outputs
+        self.resources = resources
+        self._state = "PENDING"
+        self._last_error = None
+        self._num_deps = len(deps)
+        self.lock = Lock()
 
-    def set_state(self,state):
+    def set_state(self, state):
         with self.lock:
-            self._state=state
-    
+            self._state = state
+
     def get_state(self):
         with self.lock:
             return self._state
-    
+
     def set_error(self, error):
         with self.lock:
             self._last_error = error
 
     def decrement_deps(self):
-        #smanjuje broj zavisnosti
+        # smanjuje broj zavisnosti
         with self.lock:
             if self._num_deps > 0:
-                self._num_deps-=1
-            if self._num_deps==0 and self._state == "PENDING":
-                self._state="READY"
-    
+                self._num_deps -= 1
+            if self._num_deps == 0 and self._state == "PENDING":
+                self._state = "READY"
+
     def reset(self):
         with self.lock:
-            self._state="PENDING"
-            self._last_error=None
-            self._num_deps=len(self.deps)
+            self._state = "PENDING"
+            self._last_error = None
+            self._num_deps = len(self.deps)
 
     def describe(self):
         with self.lock:
@@ -61,60 +62,65 @@ class Node:
 
             if self._last_error is not None:
                 output += f"Last error: {self._last_error}\n"
-            
+
             return output
 
-class Graph:
-    def __init__(self,capacity:dict):
-        self.nodes={}
-        self.capacity=capacity
-        self.used_capacity={"CPU":0 ,"RAM":0}
-        self.lock=Lock()
 
-    def add_node(self,node:Node):
-        self.nodes[node.id]=node
+class Graph:
+    def __init__(self, capacity: dict):
+        self.nodes = {}
+        self.capacity = capacity
+        self.used_capacity = {"CPU": 0, "RAM": 0}
+        self.lock = Lock()
+
+    def add_node(self, node: Node):
+        self.nodes[node.id] = node
 
     def reset_states(self):
         with self.lock:
             for node in self.nodes.values():
                 node.reset()
-            self.used_capacity={"CPU":0 ,"RAM":0}
+            self.used_capacity = {"CPU": 0, "RAM": 0}
 
-    def acquire_resources(self,resources:dict):
+    def acquire_resources(self, resources: dict):
         with self.lock:
-            cpu_needed=resources.get("CPU",0)
-            ram_needed=resources.get("RAM",0)
+            cpu_needed = resources.get("CPU", 0)
+            ram_needed = resources.get("RAM", 0)
 
-            cpu=self.used_capacity["CPU"]+cpu_needed<=self.capacity["CPU"]
-            ram=self.used_capacity["RAM"]+ram_needed<=self.capacity["RAM"]
+            cpu = self.used_capacity["CPU"] + cpu_needed <= self.capacity["CPU"]
+            ram = self.used_capacity["RAM"] + ram_needed <= self.capacity["RAM"]
 
             if cpu and ram:
-                self.used_capacity["CPU"]+=cpu_needed
-                self.used_capacity["RAM"]+=ram_needed
+                self.used_capacity["CPU"] += cpu_needed
+                self.used_capacity["RAM"] += ram_needed
                 return True
-            
+
             return False
 
-    def release_resources(self,resources:dict):
+    def release_resources(self, resources: dict):
         with self.lock:
-            self.used_capacity["CPU"]=max(0,self.used_capacity["CPU"]-resources.get("CPU",0))
-            self.used_capacity["RAM"]=max(0,self.used_capacity["RAM"]-resources.get("RAM",0))
+            self.used_capacity["CPU"] = max(
+                0, self.used_capacity["CPU"] - resources.get("CPU", 0)
+            )
+            self.used_capacity["RAM"] = max(
+                0, self.used_capacity["RAM"] - resources.get("RAM", 0)
+            )
 
-    def describe_node(self,node_id):
+    def describe_node(self, node_id):
         if node_id not in self.nodes:
-             return f"Node '{node_id}' does not exist."
+            return f"Node '{node_id}' does not exist."
         return self.nodes[node_id].describe()
 
-    def node_statistics(self,rafThreadPool):
+    def node_statistics(self, rafThreadPool):
         with self.lock:
-            counts={"PENDING": 0, "READY": 0, "RUNNING": 0, "DONE": 0, "FAILED": 0}
+            counts = {"PENDING": 0, "READY": 0, "RUNNING": 0, "DONE": 0, "FAILED": 0}
             for node in self.nodes.values():
-                state=node.get_state()
+                state = node.get_state()
                 if state not in counts:
-                    counts[state]=0
-                counts[state]+=1
-            cpu=self.used_capacity["CPU"]
-            ram=self.used_capacity["RAM"]
+                    counts[state] = 0
+                counts[state] += 1
+            cpu = self.used_capacity["CPU"]
+            ram = self.used_capacity["RAM"]
             return (
                 f"Node statistics:\n"
                 f"PENDING={counts['PENDING']}, READY={counts['READY']}, RUNNING={counts['RUNNING']}, "
@@ -124,57 +130,58 @@ class Graph:
                 f"Active planners: {len(activePlaners)}"
             )
 
+
 class Planer(Thread):
-    def __init__(self,target,globalGraph,rafThreadPool,messageQueue):
+    def __init__(self, target, globalGraph, rafThreadPool, messageQueue):
         super().__init__()
-        self.target=target
-        self.graph=globalGraph
-        self.pool=rafThreadPool
-        self.messageQueue=messageQueue
-        self.subgraph=set()
-        self.finished=False
+        self.target = target
+        self.graph = globalGraph
+        self.pool = rafThreadPool
+        self.messageQueue = messageQueue
+        self.subgraph = set()
+        self.finished = False
 
         with planersLock:
             activePlaners.append(self)
-    
-    def send(self,msg):
+
+    def send(self, msg):
         if self.messageQueue:
             self.messageQueue.put(msg)
         else:
             print(msg)
-    
-    #popunjava se subgraph sa cvororvima koji su potrebni da bi se target izvrsio
-    def find_subgraph(self,node_id):
+
+    # popunjava se subgraph sa cvororvima koji su potrebni da bi se target izvrsio
+    def find_subgraph(self, node_id):
         if node_id not in self.graph.nodes:
             self.send(f"Node '{node_id}' not found in graph.")
             return
         if node_id in self.subgraph:
             return
         self.subgraph.add(node_id)
-        node=self.graph.nodes[node_id]
+        node = self.graph.nodes[node_id]
         for dep in node.deps:
             self.find_subgraph(dep)
-    
-    #proverama da li su sve deps-ovi zavrseni
-    def is_ready(self,node_id):
-        node=self.graph.nodes[node_id]
+
+    # proverama da li su sve deps-ovi zavrseni
+    def is_ready(self, node_id):
+        node = self.graph.nodes[node_id]
         return all(self.graph.nodes[d].get_state() == "DONE" for d in node.deps)
-    
-    #izvrsava action od cvora
-    def execute_node(self,node):
-        act=node.action
+
+    # izvrsava action od cvora
+    def execute_node(self, node):
+        act = node.action
         if not act:
             time.sleep(0.1)
             return f"[OK] Node {node.id} has no action (meta-node)."
-        typ=act.get("type")
-        cmd=act.get("cmd")
+        typ = act.get("type")
+        cmd = act.get("cmd")
 
         if not typ or not cmd:
-             raise RuntimeError(f"Node {node.id} has invalid action!")
-        
+            raise RuntimeError(f"Node {node.id} has invalid action!")
+
         try:
             if typ == "shell":
-                res=sp.run(
+                res = sp.run(
                     cmd,
                     shell=True,
                     check=True,
@@ -183,24 +190,26 @@ class Planer(Thread):
                 )
                 return f"[OK] Node {node.id} (shell) -> {res.stdout.strip()}"
             elif typ == "py":
-                exec(cmd,{},{})
+                exec(cmd, {}, {})
                 return f"[OK] Node {node.id} (python) -> Completed"
             else:
-                 raise ValueError(f"Unknown action type: {typ}")
+                raise ValueError(f"Unknown action type: {typ}")
         except sp.CalledProcessError as e:
-             raise RuntimeError(f"Command failed for node {node.id}: {e.stderr or str(e)}")
+            raise RuntimeError(
+                f"Command failed for node {node.id}: {e.stderr or str(e)}"
+            )
         except Exception as e:
             raise RuntimeError(f"Execution error in node {node.id}: {e}")
 
-    #metoda oznacava da je cvor zavrsen    
-    def on_done(self,result,node):
+    # metoda oznacava da je cvor zavrsen
+    def on_done(self, result, node):
         self.graph.release_resources(node.resources)
         node.set_state("DONE")
         self.send(result)
         self.update_dependents(node)
         self.notify_planner()
-    
-    #ovde smanjujemo dependecije i ako sus vi zavrseni postavlja se cvor na ready
+
+    # ovde smanjujemo dependecije i ako sus vi zavrseni postavlja se cvor na ready
     def update_dependents(self, node):
         for dep_id, dep_node in self.graph.nodes.items():
             if node.id in dep_node.deps:
@@ -208,21 +217,21 @@ class Planer(Thread):
                 if self.is_ready(dep_id):
                     dep_node.set_state("READY")
                     self.send(f"Node {dep_id} is now READY!")
-    
-    #ako dodje do greske pri izvrsavanju cvora
-    def on_fail(self,error,node):
+
+    # ako dodje do greske pri izvrsavanju cvora
+    def on_fail(self, error, node):
         self.graph.release_resources(node.resources)
         node.set_state("FAILED")
         node.set_error(str(error))
         self.send(f"Node {node.id} failed: {error}")
         self.notify_planner()
-    
-    #javlja drugim threadovima da se nesto desilo
+
+    # javlja drugim threadovima da se nesto desilo
     def notify_planner(self):
         with plannerCondition:
             plannerCondition.notify_all()
 
-    #ovde se formira skup svih cvorova koji su potrebni za izvrsavanje targeta
+    # ovde se formira skup svih cvorova koji su potrebni za izvrsavanje targeta
     def initialize_subgraph(self):
         self.send(f"Starting planner for target '{self.target}'...")
         self.find_subgraph(self.target)
@@ -233,13 +242,14 @@ class Planer(Thread):
                 node.set_state("READY")
 
         self.send(f"Subgraph for '{self.target}': {', '.join(self.subgraph)}")
-    
-    #pokrece cvorove ako su ready i ako ima resursa
+
+    # pokrece cvorove ako su ready i ako ima resursa
     def dispatch_ready_nodes(self):
         dispatched = False
         with plannerCondition:
             ready_nodes = [
-                node_id for node_id in self.subgraph
+                node_id
+                for node_id in self.subgraph
                 if self.graph.nodes[node_id].get_state() == "READY"
             ]
             for node_id in ready_nodes:
@@ -257,8 +267,8 @@ class Planer(Thread):
                     )
                     dispatched = True
         return dispatched
-    
-    #proverava da li su svi cvororvi u subgraphu zavrseni
+
+    # proverava da li su svi cvororvi u subgraphu zavrseni
     def check_completion(self):
         all_done = True
         failed = False
@@ -269,8 +279,8 @@ class Planer(Thread):
             if state == "FAILED":
                 failed = True
         return all_done, failed
-    
-    #pokrece sve ready cvorove
+
+    # pokrece sve ready cvorove
     def main_loop(self):
         while not self.finished:
             dispatched = self.dispatch_ready_nodes()
@@ -289,35 +299,36 @@ class Planer(Thread):
             if not dispatched:
                 with plannerCondition:
                     plannerCondition.wait(timeout=1.0)
-    
-    #planer je zavrsio uklanja se iz liste planera
+
+    # planer je zavrsio uklanja se iz liste planera
     def cleanup(self):
         with planersLock:
             if self in activePlaners:
                 activePlaners.remove(self)
-    
+
     def run(self):
         try:
             self.initialize_subgraph()
             self.main_loop()
         finally:
             self.cleanup()
-    
+
+
 class RafThreadPool:
-    def __init__(self,num_threads):
-        self.num_threads=num_threads
-        self.tasks=Queue()
-        self.threads=[]
-        self.active_count=0
-        self.closed=False
-        self.lock=Lock()
+    def __init__(self, num_threads):
+        self.num_threads = num_threads
+        self.tasks = Queue()
+        self.threads = []
+        self.active_count = 0
+        self.closed = False
+        self.lock = Lock()
 
         for _ in range(num_threads):
-            t=Thread(target=self._worker,daemon=True)
+            t = Thread(target=self._worker, daemon=True)
             t.start()
             self.threads.append(t)
-    
-    #uzima se sledeci zadatak iz reda
+
+    # uzima se sledeci zadatak iz reda
     def get_task(self):
         try:
             return self.tasks.get(timeout=0.3)
@@ -325,16 +336,16 @@ class RafThreadPool:
             if self.is_closed():
                 return None
             return "WAIT"
-    
+
     def inc_active(self):
         with self.lock:
             self.active_count += 1
-    
+
     def dec_active(self):
         with self.lock:
             self.active_count -= 1
-    
-    #izvrsava zadatke 
+
+    # izvrsava zadatke
     def execute_task(self, task):
         func, args, cb, cb_args, err_cb, err_args, fut = task
         self.inc_active()
@@ -350,8 +361,8 @@ class RafThreadPool:
         finally:
             self.dec_active()
             self.tasks.task_done()
-    
-    #uzima zadatake i prosledjuje
+
+    # uzima zadatake i prosledjuje
     def _worker(self):
         while True:
             task = self.get_task()
@@ -360,46 +371,46 @@ class RafThreadPool:
             if task == "WAIT":
                 continue
             self.execute_task(task)
-    
-    #stavlja nove zadatke u red
+
+    # stavlja nove zadatke u red
     def apply_async(
-           self,
-           func,
-           args=(),
-           callback=None,
-           callback_args=None,
-           err_callback=None,
-           err_args=None,
+        self,
+        func,
+        args=(),
+        callback=None,
+        callback_args=None,
+        err_callback=None,
+        err_args=None,
     ):
         if self.is_closed():
-             raise RuntimeError("Thread pool is closed.")
-        fut=Future()
+            raise RuntimeError("Thread pool is closed.")
+        fut = Future()
         self.tasks.put(
-             (func, args, callback, callback_args, err_callback, err_args, fut)
+            (func, args, callback, callback_args, err_callback, err_args, fut)
         )
         return fut
-    
+
     def close(self):
         with self.lock:
-            self.closed=True
-    
+            self.closed = True
+
     def is_closed(self):
         with self.lock:
             return self.closed
-    
+
     def num_active(self):
         with self.lock:
             return self.active_count
-    
-    #ceka da se niti zavrse pa onda salje none
+
+    # ceka da se niti zavrse pa onda salje none
     def join(self):
         self.tasks.join()
         for _ in self.threads:
             self.tasks.put(None)
         for t in self.threads:
             t.join()
-    
-    #uklanaj sve zadatke koji nisu pokrenuti
+
+    # uklanaj sve zadatke koji nisu pokrenuti
     def cancel_pending_tasks(self):
         cancelled = []
         while not self.tasks.empty():
@@ -409,23 +420,23 @@ class RafThreadPool:
             except Empty:
                 break
         return cancelled
-    
-    #oznacava zadatke kao neuspesne
+
+    # oznacava zadatke kao neuspesne
     def reject_cancelled_tasks(self, cancelled):
         for func, args, cb, cb_args, err_cb, err_args, fut in cancelled:
             err = RuntimeError("Thread pool terminated.")
             if err_cb:
                 err_cb(err, *(err_args or ()))
             fut.set_exception(err)
-    
-    #gasi sve niti
+
+    # gasi sve niti
     def shutdown_threads(self):
         for _ in self.threads:
             self.tasks.put(None)
         for t in self.threads:
             t.join()
-    
-    #gasi ceo pool
+
+    # gasi ceo pool
     def terminate(self):
         with self.lock:
             self.closed = True
@@ -438,6 +449,7 @@ class RafThreadPool:
 
         for t in self.threads:
             t.join()
+
 
 class Future:
     def __init__(self):
@@ -473,6 +485,7 @@ class Future:
     def done(self):
         return self._done.is_set()
 
+
 class MyProcessPool:
     def __init__(self, num_processes):
         self.num_processes = num_processes
@@ -489,8 +502,8 @@ class MyProcessPool:
     def dec_active(self):
         with self.lock:
             self.active_count -= 1
-    
-    #dodavanje zadataka u pool
+
+    # dodavanje zadataka u pool
     def apply_async(
         self,
         func,
@@ -520,7 +533,7 @@ class MyProcessPool:
         fut = Future()
         holder = {}
 
-        #uspesan zadatak
+        # uspesan zadatak
         def on_success(res):
             try:
                 fut.set_result(res)
@@ -532,6 +545,7 @@ class MyProcessPool:
                     if ar_local is not None:
                         self.pending.discard(ar_local)
                 self.dec_active()
+
         # doslo do greske
         def on_error(err):
             try:
@@ -582,14 +596,15 @@ class MyProcessPool:
 
         self.pool.terminate()
 
-#treba ova funckija zbog  pickle-safe
+
+# treba ova funckija zbog  pickle-safe
 def execute_node_process_safe(arg0):
-   
+
     if isinstance(arg0, dict):
         node_id = arg0.get("id")
         act = arg0.get("action")
     else:
-        
+
         node_id = getattr(arg0, "id", None)
         act = getattr(arg0, "action", None)
 
@@ -619,11 +634,10 @@ def execute_node_process_safe(arg0):
         else:
             raise ValueError(f"Unknown action type: {typ}")
     except sp.CalledProcessError as e:
-        raise RuntimeError(
-            f"Command failed for node {node_id}: {e.stderr or str(e)}"
-        )
+        raise RuntimeError(f"Command failed for node {node_id}: {e.stderr or str(e)}")
     except Exception as e:
         raise RuntimeError(f"Execution error in node {node_id}: {e}")
+
 
 def load_graph(path: str, messageQueue: Queue):
     global globalGraph
@@ -675,6 +689,7 @@ def load_graph(path: str, messageQueue: Queue):
     )
     messageQueue.put(None)
 
+
 def handle_command(command: str, messageQueue: Queue):
     global globalGraph, rafThreadPool
     try:
@@ -708,7 +723,7 @@ def handle_command(command: str, messageQueue: Queue):
                 response_queue = Queue()
                 messageQueue.put(response_queue)
                 try:
-                     confirmation = response_queue.get(timeout=10).strip().lower()
+                    confirmation = response_queue.get(timeout=10).strip().lower()
                 except:
                     messageQueue.put("Timed out waiting for user confirmation.")
                     return
@@ -743,7 +758,7 @@ def handle_command(command: str, messageQueue: Queue):
                 rafThreadPool.terminate()
                 rafThreadPool.close()
                 rafThreadPool.join()
-                #rafThreadPool = RafThreadPool(4)
+                # rafThreadPool = RafThreadPool(4)
                 rafThreadPool = MyProcessPool(4)
 
         elif command == "exit":
@@ -763,12 +778,13 @@ def handle_command(command: str, messageQueue: Queue):
     finally:
         messageQueue.put(None)
 
+
 def main():
     global globalGraph, rafThreadPool
 
     globalGraph = None
-    #rafThreadPool = RafThreadPool(4)
-    rafThreadPool = MyProcessPool(4)
+    rafThreadPool = RafThreadPool(4)
+    # rafThreadPool = MyProcessPool(4)
 
     while True:
         try:
@@ -802,6 +818,7 @@ def main():
             break
         except Exception as e:
             print(f"Exception occurred: {e}")
+
 
 if __name__ == "__main__":
     main()
