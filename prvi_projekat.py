@@ -41,8 +41,7 @@ class Node:
         with self.lock:
             if self._num_deps > 0:
                 self._num_deps -= 1
-            if self._num_deps == 0 and self._state == "PENDING":
-                self._state = "READY"
+            return self._num_deps == 0 and self._state == "PENDING"
 
     def reset(self):
         with self.lock:
@@ -54,10 +53,10 @@ class Node:
         with self.lock:
             output = f"DESCRIPTION OF NODE: {self.id}\n"
             output += f"STATE: {self._state}\n"
-            output += f"DEPENDENCIES: {", ".join(self.deps)}\n"
-            output += f"I/Os: {", ".join(self.outputs)}\n"
-            output += f"CPU usage: {self.resources["CPU"]}\n"
-            output += f"RAM usage: {self.resources["RAM"]}\n"
+            output += f"DEPENDENCIES: {', '.join(self.deps)}\n"
+            output += f"I/Os: {', '.join(self.outputs)}\n"
+            output += f"CPU usage: {self.resources.get('CPU', 0)}\n"
+            output += f"RAM usage: {self.resources.get('RAM', 0)}\n"
             output += f"Number of DEPS: {self._num_deps}\n"
 
             if self._last_error is not None:
@@ -173,6 +172,7 @@ class Planer(Thread):
         if not act:
             time.sleep(0.1)
             return f"[OK] Node {node.id} has no action (meta-node)."
+
         typ = act.get("type")
         cmd = act.get("cmd")
 
@@ -206,17 +206,16 @@ class Planer(Thread):
         self.graph.release_resources(node.resources)
         node.set_state("DONE")
         self.send(result)
-        self.update_dependents(node)
-        self.notify_planner()
 
-    # ovde smanjujemo dependecije i ako su svi zavrseni postavlja se cvor na ready
-    def update_dependents(self, node):
-        for dep_id, dep_node in self.graph.nodes.items():
+        # Update dependents
+        for dep_id in self.subgraph:
+            dep_node = self.graph.nodes[dep_id]
             if node.id in dep_node.deps:
-                dep_node.decrement_deps()
-                if self.is_ready(dep_id):
+                if dep_node.decrement_deps():
                     dep_node.set_state("READY")
                     self.send(f"Node {dep_id} is now READY!")
+
+        self.notify_planner()
 
     # ako dodje do greske pri izvrsavanju cvora
     def on_fail(self, error, node):
@@ -246,26 +245,27 @@ class Planer(Thread):
     # pokrece cvorove ako su ready i ako ima resursa
     def dispatch_ready_nodes(self):
         dispatched = False
-        with plannerCondition:
-            ready_nodes = [
-                node_id
-                for node_id in self.subgraph
-                if self.graph.nodes[node_id].get_state() == "READY"
-            ]
-            for node_id in ready_nodes:
-                node = self.graph.nodes[node_id]
-                if self.graph.acquire_resources(node.resources):
-                    node.set_state("RUNNING")
-                    self.send(f"Running node: {node_id}")
-                    self.pool.apply_async(
-                        func=self.execute_node,
-                        args=(node,),
-                        callback=self.on_done,
-                        callback_args=(node,),
-                        err_callback=self.on_fail,
-                        err_args=(node,),
-                    )
-                    dispatched = True
+        ready_nodes = [
+            node_id
+            for node_id in self.subgraph
+            if self.graph.nodes[node_id].get_state() == "READY"
+        ]
+
+        for node_id in ready_nodes:
+            node = self.graph.nodes[node_id]
+            if self.graph.acquire_resources(node.resources):
+                node.set_state("RUNNING")
+                self.send(f"Running node: {node_id}")
+                self.pool.apply_async(
+                    func=self.execute_node,
+                    args=(node,),
+                    callback=self.on_done,
+                    callback_args=(node,),
+                    err_callback=self.on_fail,
+                    err_args=(node,),
+                )
+                dispatched = True
+
         return dispatched
 
     # proverava da li su svi cvororvi u subgraphu zavrseni
@@ -322,20 +322,12 @@ class RafThreadPool:
         self.active_count = 0
         self.closed = False
         self.lock = Lock()
+        self.active_condition = Condition(self.lock)
 
-        for _ in range(num_threads):
-            thread = Thread(target=self._worker, daemon=True)
+        for i in range(num_threads):
+            thread = Thread(target=self._worker, daemon=True, name=f"Worker-{i}")
             thread.start()
             self.threads.append(thread)
-
-    # uzima se sledeci zadatak iz reda
-    def get_task(self):
-        try:
-            return self.tasks.get(timeout=0.3)
-        except Empty:
-            if self.is_closed():
-                return None
-            return "WAIT"
 
     def inc_active(self):
         with self.lock:
@@ -344,35 +336,39 @@ class RafThreadPool:
     def dec_active(self):
         with self.lock:
             self.active_count -= 1
+            self.active_condition.notify_all()
 
-    # izvrsava zadatke
-    def execute_task(self, task):
-        func, args, callback, cb_args, err_cb, err_args, future = task
-        self.inc_active()
-        try:
-            res = func(*args)
-            future.set_result(res)
-            if callback:
-                callback(res, *(cb_args or ()))
-        except Exception as e:
-            future.set_exception(e)
-            if err_cb:
-                err_cb(e, *(err_args or ()))
-        finally:
-            self.dec_active()
-            self.tasks.task_done()
-
-    # uzima zadatake i prosledjuje
     def _worker(self):
         while True:
-            task = self.get_task()
-            if task is None:
-                break
-            if task == "WAIT":
-                continue
-            self.execute_task(task)
+            try:
+                # Čekamo task iz našeg reda sa timeout-om
+                task = self.tasks.get(timeout=0.5)
 
-    # stavlja nove zadatke u red
+                # Zaustavljamo worker-a ako je task None
+                if task is None:
+                    break
+
+                # Vadimo podatke iz task-a
+                func, args, callback, cb_args, err_cb, err_args, future = task
+
+                self.inc_active()
+                try:
+                    res = func(*args)
+                    future.set_result(res)
+                    if callback:
+                        callback(res, *(cb_args or ()))
+                except Exception as e:
+                    future.set_exception(e)
+                    if err_cb:
+                        err_cb(e, *(err_args or ()))
+                finally:
+                    self.dec_active()
+                    self.tasks.task_done()
+            except Empty:
+                if self.is_closed():
+                    break
+                continue
+
     def apply_async(
         self,
         func,
@@ -388,6 +384,7 @@ class RafThreadPool:
         self.tasks.put(
             (func, args, callback, callback_args, err_callback, err_args, future)
         )
+
         return future
 
     def close(self):
@@ -402,7 +399,6 @@ class RafThreadPool:
         with self.lock:
             return self.active_count
 
-    # ceka da se niti zavrse pa onda salje none
     def join(self):
         self.tasks.join()
         for _ in self.threads:
@@ -416,7 +412,8 @@ class RafThreadPool:
         while not self.tasks.empty():
             try:
                 task = self.tasks.get_nowait()
-                cancelled.append(task)
+                if task is not None:  # Don't include sentinel values
+                    cancelled.append(task)
             except Empty:
                 break
         return cancelled
@@ -493,7 +490,7 @@ class MyProcessPool:
         self.lock = Lock()
         self.closed = False
         self.active_count = 0
-        self.pending = set()
+        self.pending = {}  # Changed to dict to track futures
 
     def inc_active(self):
         with self.lock:
@@ -535,40 +532,44 @@ class MyProcessPool:
         future = Future()
         self.inc_active()
 
-        result = self.pool.apply_async(call_func, args=call_args)
-
-        def on_success(res, handle=result):
+        def on_success(res):
             try:
                 future.set_result(res)
                 if callback:
-                    callback(res, *(callback_args or ()))
+                    if callback_args:
+                        callback(res, *callback_args)
+                    else:
+                        callback(res)
             finally:
                 with self.lock:
-                    self.pending.discard(handle)
+                    self.pending.pop(id(future), None)
                 self.dec_active()
 
-        def on_error(err, handle=result):
+        def on_error(err):
             try:
                 future.set_exception(err)
                 if err_callback:
-                    err_callback(err, *(err_args or ()))
+                    if err_args:
+                        err_callback(err, *err_args)
+                    else:
+                        err_callback(err)
             finally:
                 with self.lock:
-                    self.pending.discard(handle)
+                    self.pending.pop(id(future), None)
                 self.dec_active()
 
-        result._callback = on_success
-        result._error_callback = on_error
+        result = self.pool.apply_async(
+            call_func, args=call_args, callback=on_success, error_callback=on_error
+        )
 
         with self.lock:
-            self.pending.add(result)
+            self.pending[id(future)] = (future, result)
 
         return future
 
     def close(self):
         with self.lock:
             self.closed = True
-
         self.pool.close()
 
     def is_closed(self):
@@ -585,9 +586,7 @@ class MyProcessPool:
     def terminate(self):
         with self.lock:
             self.closed = True
-            pending = list(self.pending)
             self.pending.clear()
-
         self.pool.terminate()
 
 
@@ -597,7 +596,6 @@ def execute_node_process_safe(arg0):
         node_id = arg0.get("id")
         act = arg0.get("action")
     else:
-
         node_id = getattr(arg0, "id", None)
         act = getattr(arg0, "action", None)
 
@@ -642,12 +640,13 @@ def load_graph(path: str, messageQueue: Queue):
         message = f"[ERROR] File: {path} not found."
         messageQueue.put(message)
         messageQueue.put(None)
+        return
 
     capacity = dagData.get("capacity", {"CPU": 0, "RAM": 0})
     graph = Graph(capacity=capacity)
 
     for node in dagData.get("nodes", []):
-        node = Node(
+        node_obj = Node(
             id=node.get("id"),
             deps=node.get("deps", []),
             action=node.get("action", None),
@@ -655,17 +654,21 @@ def load_graph(path: str, messageQueue: Queue):
             resources=node.get("resources", {"CPU": 0, "RAM": 0}),
         )
 
-        if node.resources["CPU"] > capacity["CPU"]:
-            messageQueue.put(f"[ERROR] Node {node.id} exceeds available CPU resources.")
+        if node_obj.resources["CPU"] > capacity["CPU"]:
+            messageQueue.put(
+                f"[ERROR] Node {node_obj.id} exceeds available CPU resources."
+            )
             messageQueue.put(None)
             return
 
-        if node.resources["RAM"] > capacity["RAM"]:
-            messageQueue.put(f"[ERROR] Node {node.id} exceeds available RAM resources.")
+        if node_obj.resources["RAM"] > capacity["RAM"]:
+            messageQueue.put(
+                f"[ERROR] Node {node_obj.id} exceeds available RAM resources."
+            )
             messageQueue.put(None)
             return
 
-        graph.add_node(node=node)
+        graph.add_node(node=node_obj)
 
     for node in graph.nodes.values():
         for dep in node.deps:
@@ -705,6 +708,7 @@ def handle_command(command: str, messageQueue: Queue):
                 planer = Planer(target, globalGraph, rafThreadPool, messageQueue)
                 planer.daemon = True
                 planer.start()
+                # Don't immediately send None, let the planner send messages
 
         elif command == "clean":
             if globalGraph is None:
@@ -719,6 +723,7 @@ def handle_command(command: str, messageQueue: Queue):
                     confirmation = response_queue.get(timeout=10).strip().lower()
                 except:
                     messageQueue.put("Timed out waiting for user confirmation.")
+                    messageQueue.put(None)
                     return
                 if confirmation == "yes":
                     globalGraph.reset_states()
@@ -749,8 +754,6 @@ def handle_command(command: str, messageQueue: Queue):
             else:
                 messageQueue.put("Canceling all pending tasks...")
                 rafThreadPool.terminate()
-                rafThreadPool.close()
-                rafThreadPool.join()
                 rafThreadPool = RafThreadPool(4)
                 # rafThreadPool = MyProcessPool(4)
 
@@ -758,6 +761,7 @@ def handle_command(command: str, messageQueue: Queue):
             if rafThreadPool.num_active() > 0:
                 messageQueue.put("An active build is running. Performing cancel first.")
                 rafThreadPool.terminate()
+                rafThreadPool = RafThreadPool(4)
             rafThreadPool.close()
             rafThreadPool.join()
             messageQueue.put("Closing thread pool and exiting program.")
@@ -768,7 +772,9 @@ def handle_command(command: str, messageQueue: Queue):
 
     except Exception as e:
         messageQueue.put(f"Error while processing command: {e}")
-    finally:
+
+    # Send None for all commands except 'build'
+    if not command.startswith("build "):
         messageQueue.put(None)
 
 
@@ -792,22 +798,42 @@ def main():
             )
             mainThread.start()
 
-            while True:
-                message = messageQueue.get()
-
-                if message is None:
-                    break
-                elif message == "CLEAN_CONFIRMATION":
-                    responseQueue = messageQueue.get()
-                    user_input = input("Are you sure? (yes/no): ").strip()
-                    responseQueue.put(user_input)
-                elif message == "EXIT":
-                    return
-                else:
-                    print(message)
+            # For build commands, we need to keep listening for messages
+            # until the planner finishes
+            if command.startswith("build "):
+                # Keep processing messages from the planner
+                while True:
+                    try:
+                        message = messageQueue.get(timeout=0.1)
+                        if message is None:
+                            break
+                        elif message == "EXIT":
+                            return
+                        else:
+                            print(message)
+                    except Empty:
+                        # Check if planner is still active
+                        with planersLock:
+                            if not any(p.is_alive() for p in activePlaners):
+                                break
+                        continue
+            else:
+                # For non-build commands, process messages normally
+                while True:
+                    message = messageQueue.get()
+                    if message is None:
+                        break
+                    elif message == "CLEAN_CONFIRMATION":
+                        responseQueue = messageQueue.get()
+                        user_input = input("Are you sure? (yes/no): ").strip()
+                        responseQueue.put(user_input)
+                    elif message == "EXIT":
+                        return
+                    else:
+                        print(message)
 
         except KeyboardInterrupt:
-            print("User interrupted the program.")
+            print("\nUser interrupted the program.")
             break
         except Exception as e:
             print(f"Exception occurred: {e}")
