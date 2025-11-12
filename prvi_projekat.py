@@ -209,7 +209,7 @@ class Planer(Thread):
         self.update_dependents(node)
         self.notify_planner()
 
-    # ovde smanjujemo dependecije i ako sus vi zavrseni postavlja se cvor na ready
+    # ovde smanjujemo dependecije i ako su svi zavrseni postavlja se cvor na ready
     def update_dependents(self, node):
         for dep_id, dep_node in self.graph.nodes.items():
             if node.id in dep_node.deps:
@@ -324,9 +324,9 @@ class RafThreadPool:
         self.lock = Lock()
 
         for _ in range(num_threads):
-            t = Thread(target=self._worker, daemon=True)
-            t.start()
-            self.threads.append(t)
+            thread = Thread(target=self._worker, daemon=True)
+            thread.start()
+            self.threads.append(thread)
 
     # uzima se sledeci zadatak iz reda
     def get_task(self):
@@ -347,15 +347,15 @@ class RafThreadPool:
 
     # izvrsava zadatke
     def execute_task(self, task):
-        func, args, cb, cb_args, err_cb, err_args, fut = task
+        func, args, callback, cb_args, err_cb, err_args, future = task
         self.inc_active()
         try:
             res = func(*args)
-            fut.set_result(res)
-            if cb:
-                cb(res, *(cb_args or ()))
+            future.set_result(res)
+            if callback:
+                callback(res, *(cb_args or ()))
         except Exception as e:
-            fut.set_exception(e)
+            future.set_exception(e)
             if err_cb:
                 err_cb(e, *(err_args or ()))
         finally:
@@ -384,11 +384,11 @@ class RafThreadPool:
     ):
         if self.is_closed():
             raise RuntimeError("Thread pool is closed.")
-        fut = Future()
+        future = Future()
         self.tasks.put(
-            (func, args, callback, callback_args, err_callback, err_args, fut)
+            (func, args, callback, callback_args, err_callback, err_args, future)
         )
-        return fut
+        return future
 
     def close(self):
         with self.lock:
@@ -423,11 +423,11 @@ class RafThreadPool:
 
     # oznacava zadatke kao neuspesne
     def reject_cancelled_tasks(self, cancelled):
-        for func, args, cb, cb_args, err_cb, err_args, fut in cancelled:
+        for func, args, cb, cb_args, err_cb, err_args, future in cancelled:
             err = RuntimeError("Thread pool terminated.")
             if err_cb:
                 err_cb(err, *(err_args or ()))
-            fut.set_exception(err)
+            future.set_exception(err)
 
     # gasi sve niti
     def shutdown_threads(self):
@@ -501,7 +501,8 @@ class MyProcessPool:
 
     def dec_active(self):
         with self.lock:
-            self.active_count -= 1
+            if self.active_count > 0:
+                self.active_count -= 1
 
     # dodavanje zadataka u pool
     def apply_async(
@@ -518,6 +519,7 @@ class MyProcessPool:
 
         call_func = func
         call_args = args
+
         try:
             if getattr(func, "__name__", None) == "execute_node" and args:
                 node_obj = args[0]
@@ -530,51 +532,43 @@ class MyProcessPool:
         except Exception:
             pass
 
-        fut = Future()
-        holder = {}
+        future = Future()
+        self.inc_active()
 
-        # uspesan zadatak
-        def on_success(res):
+        result = self.pool.apply_async(call_func, args=call_args)
+
+        def on_success(res, handle=result):
             try:
-                fut.set_result(res)
+                future.set_result(res)
                 if callback:
                     callback(res, *(callback_args or ()))
             finally:
                 with self.lock:
-                    ar_local = holder.get("ar")
-                    if ar_local is not None:
-                        self.pending.discard(ar_local)
+                    self.pending.discard(handle)
                 self.dec_active()
 
-        # doslo do greske
-        def on_error(err):
+        def on_error(err, handle=result):
             try:
-                fut.set_exception(err)
+                future.set_exception(err)
                 if err_callback:
                     err_callback(err, *(err_args or ()))
             finally:
                 with self.lock:
-                    ar_local = holder.get("ar")
-                    if ar_local is not None:
-                        self.pending.discard(ar_local)
+                    self.pending.discard(handle)
                 self.dec_active()
 
-        self.inc_active()
-        ar = self.pool.apply_async(
-            call_func,
-            args=call_args,
-            callback=on_success,
-            error_callback=on_error,
-        )
-        with self.lock:
-            self.pending.add(ar)
-        holder["ar"] = ar
+        result._callback = on_success
+        result._error_callback = on_error
 
-        return fut
+        with self.lock:
+            self.pending.add(result)
+
+        return future
 
     def close(self):
         with self.lock:
             self.closed = True
+
         self.pool.close()
 
     def is_closed(self):
@@ -599,7 +593,6 @@ class MyProcessPool:
 
 # treba ova funckija zbog  pickle-safe
 def execute_node_process_safe(arg0):
-
     if isinstance(arg0, dict):
         node_id = arg0.get("id")
         act = arg0.get("action")
@@ -758,8 +751,8 @@ def handle_command(command: str, messageQueue: Queue):
                 rafThreadPool.terminate()
                 rafThreadPool.close()
                 rafThreadPool.join()
-                # rafThreadPool = RafThreadPool(4)
-                rafThreadPool = MyProcessPool(4)
+                rafThreadPool = RafThreadPool(4)
+                # rafThreadPool = MyProcessPool(4)
 
         elif command == "exit":
             if rafThreadPool.num_active() > 0:
