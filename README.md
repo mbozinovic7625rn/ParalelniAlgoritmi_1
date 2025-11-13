@@ -12,11 +12,10 @@
 Nije uradjeno:
 
 - Bonus zadatak za ProcessPool
-- Ostalo sve bi trebalo da radi
 
 Pitanja za AI:
 
-- Napravi mi primere dag fajlova koji sadrže i fail i ispituju paralelenost Planera
+- Napravi mi primere dag fajlova koji sadrže i fail i ispituju Planera
 - Da li je potreban lock u Graf klasi (pozitivan odgovor)
 - Da li je moguće uraditi Future klasu preko semafora ili condition-a? (Odgovor je bio pozitivan. Za semafore je overkill dok je za condition-e moguće uraditi)
 - Kako izvršiti shell i py proces iz naše akcije u python skripti? (Odgovor je bio preko subprocess-a i exec funkcije)
