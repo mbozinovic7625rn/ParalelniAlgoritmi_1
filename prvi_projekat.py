@@ -8,8 +8,10 @@ import multiprocessing as mp
 globalGraph = None
 rafThreadPool = None
 activePlaners = []
-planersLock = Lock()
-plannerCondition = Condition()
+planersLock = Lock()  # koristi se za sinhronizaciju pristupa listi aktivnih planera
+plannerCondition = (
+    Condition()
+)  # koristi se kako bi javili drugim thread-ovima da smo oslobodili resurse
 
 
 class Node:
@@ -315,6 +317,7 @@ class Planer(Thread):
             if self in activePlaners:
                 activePlaners.remove(self)
 
+    # pokrece izvrsavanje niti (Planera)
     def run(self):
         try:
             self.initialize_subgraph()
@@ -711,8 +714,6 @@ def handle_command(command: str, messageQueue: Queue):
                 planer = Planer(target, globalGraph, rafThreadPool, messageQueue)
                 planer.daemon = True
                 planer.start()
-                # Don't immediately send None, let the planner send messages
-
         elif command == "clean":
             if globalGraph is None:
                 messageQueue.put("No graph loaded!")
@@ -735,20 +736,17 @@ def handle_command(command: str, messageQueue: Queue):
                     )
                 else:
                     messageQueue.put("Clean operation canceled.")
-
         elif command == "stats":
             if globalGraph is None:
                 messageQueue.put("No graph loaded!")
             else:
                 messageQueue.put(globalGraph.node_statistics(rafThreadPool))
-
         elif command.startswith("describe "):
             node_id = command[9:].strip()
             if globalGraph is None:
                 messageQueue.put("No graph loaded!")
             else:
                 messageQueue.put(globalGraph.describe_node(node_id))
-
         elif command == "cancel":
             if globalGraph is None:
                 messageQueue.put("No graph loaded. No active build!")
@@ -758,8 +756,6 @@ def handle_command(command: str, messageQueue: Queue):
                 messageQueue.put("Canceling all pending tasks...")
                 rafThreadPool.terminate()
                 rafThreadPool = RafThreadPool(4)
-                #rafThreadPool = MyProcessPool(4)
-
         elif command == "exit":
             if rafThreadPool.num_active() > 0:
                 messageQueue.put("An active build is running. Performing cancel first.")
@@ -770,14 +766,12 @@ def handle_command(command: str, messageQueue: Queue):
             rafThreadPool.join()
             messageQueue.put("Closing thread pool and exiting program.")
             messageQueue.put("EXIT")
-
         else:
             messageQueue.put("Unknown command. Please try again.")
 
     except Exception as e:
         messageQueue.put(f"Error while processing command: {e}")
 
-    # Send None for all commands except 'build'
     if not command.startswith("build "):
         messageQueue.put(None)
 
@@ -786,7 +780,6 @@ def main():
 
     globalGraph = None
     rafThreadPool = RafThreadPool(4)
-    #rafThreadPool = MyProcessPool(4)
 
     while True:
         try:
@@ -801,10 +794,8 @@ def main():
             )
             mainThread.start()
 
-            # For build commands, we need to keep listening for messages
-            # until the planner finishes
+            # Build komanda se obradjuje posebno
             if command.startswith("build "):
-                # Keep processing messages from the planner
                 while True:
                     try:
                         message = messageQueue.get(timeout=0.1)
@@ -815,13 +806,11 @@ def main():
                         else:
                             print(message)
                     except Empty:
-                        # Check if planner is still active
                         with planersLock:
                             if not any(p.is_alive() for p in activePlaners):
                                 break
                         continue
             else:
-                # For non-build commands, process messages normally
                 while True:
                     message = messageQueue.get()
                     if message is None:
