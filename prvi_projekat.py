@@ -64,7 +64,6 @@ class Node:
 
             return output
 
-
 class Graph:
     def __init__(self, capacity: dict):
         self.nodes = {}
@@ -75,7 +74,7 @@ class Graph:
     def add_node(self, node: Node):
         self.nodes[node.id] = node
 
-    def reset_states(self):
+    def reset_node_states(self):
         with self.lock:
             for node in self.nodes.values():
                 node.reset()
@@ -128,7 +127,6 @@ class Graph:
                 f"Active threads: {rafThreadPool.num_active()}\n"
                 f"Active planners: {len(activePlaners)}"
             )
-
 
 class Planer(Thread):
     def __init__(self, target, globalGraph, rafThreadPool, messageQueue):
@@ -214,7 +212,7 @@ class Planer(Thread):
                 if dep_node.decrement_deps():
                     dep_node.set_state("READY")
                     self.send(f"Node {dep_id} is now READY!")
-
+                    
         self.notify_planner()
 
     # ako dodje do greske pri izvrsavanju cvora
@@ -223,8 +221,16 @@ class Planer(Thread):
         node.set_state("FAILED")
         node.set_error(str(error))
         self.send(f"Node {node.id} failed: {error}")
-        self.notify_planner()
 
+        for dep_id in self.subgraph:
+            dep_node = self.graph.nodes[dep_id]
+            if node.id in dep_node.deps and dep_node.get_state() not in ("DONE", "FAILED"):
+                dep_node.set_state("FAILED")
+                dep_node.set_error(f"Dependency {node.id} failed.")
+                self.send(f"Node {dep_id} cannot run (depends on failed {node.id}).")
+                
+        self.notify_planner()
+    
     # javlja drugim threadovima da se nesto desilo
     def notify_planner(self):
         with plannerCondition:
@@ -269,32 +275,35 @@ class Planer(Thread):
         return dispatched
 
     # proverava da li su svi cvororvi u subgraphu zavrseni
-    def check_completion(self):
+    def get_subgraph_status(self):
         all_done = True
         failed = False
+        running_exists=False
         for node_id in self.subgraph:
             state = self.graph.nodes[node_id].get_state()
+            if state == "RUNNING":
+                running_exists = True
             if state not in ("DONE", "FAILED"):
                 all_done = False
             if state == "FAILED":
                 failed = True
-        return all_done, failed
+        return all_done, failed,running_exists
 
     # pokrece sve ready cvorove
     def main_loop(self):
         while not self.finished:
             dispatched = self.dispatch_ready_nodes()
-            all_done, failed = self.check_completion()
+            all_done, failed,running_exists = self.get_subgraph_status()
 
-            if all_done:
-                msg = (
-                    "Build finished with errors."
-                    if failed
-                    else "All nodes successfully completed."
-                )
-                self.send(msg)
+            if failed and not running_exists:
+                self.send("Build finished with errors.")
                 self.finished = True
-                break
+                return
+            
+            if all_done:
+                self.send("All nodes successfully completed.")
+                self.finished = True
+                return
 
             if not dispatched:
                 with plannerCondition:
@@ -312,7 +321,6 @@ class Planer(Thread):
             self.main_loop()
         finally:
             self.cleanup()
-
 
 class RafThreadPool:
     def __init__(self, num_threads):
@@ -419,7 +427,7 @@ class RafThreadPool:
         return cancelled
 
     # oznacava zadatke kao neuspesne
-    def reject_cancelled_tasks(self, cancelled):
+    def fail_pending_tasks(self, cancelled):
         for func, args, cb, cb_args, err_cb, err_args, future in cancelled:
             err = RuntimeError("Thread pool terminated.")
             if err_cb:
@@ -439,14 +447,13 @@ class RafThreadPool:
             self.closed = True
 
         cancelled = self.cancel_pending_tasks()
-        self.reject_cancelled_tasks(cancelled)
+        self.fail_pending_tasks(cancelled)
 
         for _ in self.threads:
             self.tasks.put(None)
 
         for t in self.threads:
             t.join()
-
 
 class Future:
     def __init__(self):
@@ -481,7 +488,6 @@ class Future:
 
     def done(self):
         return self._done.is_set()
-
 
 class MyProcessPool:
     def __init__(self, num_processes):
@@ -589,7 +595,6 @@ class MyProcessPool:
             self.pending.clear()
         self.pool.terminate()
 
-
 # treba ova funckija zbog  pickle-safe
 def execute_node_process_safe(arg0):
     if isinstance(arg0, dict):
@@ -628,7 +633,6 @@ def execute_node_process_safe(arg0):
         raise RuntimeError(f"Command failed for node {node_id}: {e.stderr or str(e)}")
     except Exception as e:
         raise RuntimeError(f"Execution error in node {node_id}: {e}")
-
 
 def load_graph(path: str, messageQueue: Queue):
     global globalGraph
@@ -685,7 +689,6 @@ def load_graph(path: str, messageQueue: Queue):
     )
     messageQueue.put(None)
 
-
 def handle_command(command: str, messageQueue: Queue):
     global globalGraph, rafThreadPool
     try:
@@ -726,7 +729,7 @@ def handle_command(command: str, messageQueue: Queue):
                     messageQueue.put(None)
                     return
                 if confirmation == "yes":
-                    globalGraph.reset_states()
+                    globalGraph.reset_node_states()
                     messageQueue.put(
                         "Graph reset — all nodes returned to PENDING state."
                     )
@@ -755,13 +758,14 @@ def handle_command(command: str, messageQueue: Queue):
                 messageQueue.put("Canceling all pending tasks...")
                 rafThreadPool.terminate()
                 rafThreadPool = RafThreadPool(4)
-                # rafThreadPool = MyProcessPool(4)
+                #rafThreadPool = MyProcessPool(4)
 
         elif command == "exit":
             if rafThreadPool.num_active() > 0:
                 messageQueue.put("An active build is running. Performing cancel first.")
                 rafThreadPool.terminate()
                 rafThreadPool = RafThreadPool(4)
+                #rafThreadPool = MyProcessPool(4)
             rafThreadPool.close()
             rafThreadPool.join()
             messageQueue.put("Closing thread pool and exiting program.")
@@ -777,13 +781,12 @@ def handle_command(command: str, messageQueue: Queue):
     if not command.startswith("build "):
         messageQueue.put(None)
 
-
 def main():
     global globalGraph, rafThreadPool
 
     globalGraph = None
     rafThreadPool = RafThreadPool(4)
-    # rafThreadPool = MyProcessPool(4)
+    #rafThreadPool = MyProcessPool(4)
 
     while True:
         try:
@@ -837,7 +840,6 @@ def main():
             break
         except Exception as e:
             print(f"Exception occurred: {e}")
-
 
 if __name__ == "__main__":
     main()
