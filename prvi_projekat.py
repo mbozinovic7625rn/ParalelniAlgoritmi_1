@@ -66,6 +66,7 @@ class Node:
 
             return output
 
+
 class Graph:
     def __init__(self, capacity: dict):
         self.nodes = {}
@@ -129,6 +130,7 @@ class Graph:
                 f"Active threads: {rafThreadPool.num_active()}\n"
                 f"Active planners: {len(activePlaners)}"
             )
+
 
 class Planer(Thread):
     def __init__(self, target, globalGraph, rafThreadPool, messageQueue):
@@ -214,7 +216,7 @@ class Planer(Thread):
                 if dep_node.decrement_deps():
                     dep_node.set_state("READY")
                     self.send(f"Node {dep_id} is now READY!")
-                    
+
         self.notify_planner()
 
     # ako dodje do greske pri izvrsavanju cvora
@@ -226,13 +228,16 @@ class Planer(Thread):
 
         for dep_id in self.subgraph:
             dep_node = self.graph.nodes[dep_id]
-            if node.id in dep_node.deps and dep_node.get_state() not in ("DONE", "FAILED"):
+            if node.id in dep_node.deps and dep_node.get_state() not in (
+                "DONE",
+                "FAILED",
+            ):
                 dep_node.set_state("FAILED")
                 dep_node.set_error(f"Dependency {node.id} failed.")
                 self.send(f"Node {dep_id} cannot run (depends on failed {node.id}).")
-                
+
         self.notify_planner()
-    
+
     # javlja drugim threadovima da se nesto desilo
     def notify_planner(self):
         with plannerCondition:
@@ -280,7 +285,7 @@ class Planer(Thread):
     def get_subgraph_status(self):
         all_done = True
         failed = False
-        running_exists=False
+        running_exists = False
         for node_id in self.subgraph:
             state = self.graph.nodes[node_id].get_state()
             if state == "RUNNING":
@@ -289,19 +294,19 @@ class Planer(Thread):
                 all_done = False
             if state == "FAILED":
                 failed = True
-        return all_done, failed,running_exists
+        return all_done, failed, running_exists
 
     # pokrece sve ready cvorove
     def main_loop(self):
         while not self.finished:
             dispatched = self.dispatch_ready_nodes()
-            all_done, failed,running_exists = self.get_subgraph_status()
+            all_done, failed, running_exists = self.get_subgraph_status()
 
             if failed and not running_exists:
                 self.send("Build finished with errors.")
                 self.finished = True
                 return
-            
+
             if all_done:
                 self.send("All nodes successfully completed.")
                 self.finished = True
@@ -324,6 +329,7 @@ class Planer(Thread):
             self.main_loop()
         finally:
             self.cleanup()
+
 
 class RafThreadPool:
     def __init__(self, num_threads):
@@ -458,6 +464,7 @@ class RafThreadPool:
         for t in self.threads:
             t.join()
 
+
 class Future:
     def __init__(self):
         self._done = Event()
@@ -492,150 +499,6 @@ class Future:
     def done(self):
         return self._done.is_set()
 
-class MyProcessPool:
-    def __init__(self, num_processes):
-        self.num_processes = num_processes
-        self.pool = mp.Pool(processes=num_processes)
-        self.lock = Lock()
-        self.closed = False
-        self.active_count = 0
-        self.pending = {}  # Changed to dict to track futures
-
-    def inc_active(self):
-        with self.lock:
-            self.active_count += 1
-
-    def dec_active(self):
-        with self.lock:
-            if self.active_count > 0:
-                self.active_count -= 1
-
-    # dodavanje zadataka u pool
-    def apply_async(
-        self,
-        func,
-        args=(),
-        callback=None,
-        callback_args=None,
-        err_callback=None,
-        err_args=None,
-    ):
-        if self.is_closed():
-            raise RuntimeError("Process pool is closed.")
-
-        call_func = func
-        call_args = args
-
-        try:
-            if getattr(func, "__name__", None) == "execute_node" and args:
-                node_obj = args[0]
-                payload = {
-                    "id": getattr(node_obj, "id", None),
-                    "action": getattr(node_obj, "action", None),
-                }
-                call_func = execute_node_process_safe
-                call_args = (payload,)
-        except Exception:
-            pass
-
-        future = Future()
-        self.inc_active()
-
-        def on_success(res):
-            try:
-                future.set_result(res)
-                if callback:
-                    if callback_args:
-                        callback(res, *callback_args)
-                    else:
-                        callback(res)
-            finally:
-                with self.lock:
-                    self.pending.pop(id(future), None)
-                self.dec_active()
-
-        def on_error(err):
-            try:
-                future.set_exception(err)
-                if err_callback:
-                    if err_args:
-                        err_callback(err, *err_args)
-                    else:
-                        err_callback(err)
-            finally:
-                with self.lock:
-                    self.pending.pop(id(future), None)
-                self.dec_active()
-
-        result = self.pool.apply_async(
-            call_func, args=call_args, callback=on_success, error_callback=on_error
-        )
-
-        with self.lock:
-            self.pending[id(future)] = (future, result)
-
-        return future
-
-    def close(self):
-        with self.lock:
-            self.closed = True
-        self.pool.close()
-
-    def is_closed(self):
-        with self.lock:
-            return self.closed
-
-    def num_active(self):
-        with self.lock:
-            return self.active_count
-
-    def join(self):
-        self.pool.join()
-
-    def terminate(self):
-        with self.lock:
-            self.closed = True
-            self.pending.clear()
-        self.pool.terminate()
-
-# treba ova funckija zbog  pickle-safe
-def execute_node_process_safe(arg0):
-    if isinstance(arg0, dict):
-        node_id = arg0.get("id")
-        act = arg0.get("action")
-    else:
-        node_id = getattr(arg0, "id", None)
-        act = getattr(arg0, "action", None)
-
-    if not act:
-        time.sleep(0.1)
-        return f"[OK] Node {node_id} has no action (meta-node)."
-
-    typ, cmd = act.get("type"), act.get("cmd")
-
-    if not typ or not cmd:
-        raise RuntimeError(f"Node {node_id} has invalid action!")
-
-    try:
-        if typ == "shell":
-            res = sp.run(
-                cmd,
-                shell=True,
-                check=True,
-                stdout=sp.PIPE,
-                stderr=sp.PIPE,
-                text=True,
-            )
-            return f"[OK] Node {node_id} (shell) -> {res.stdout.strip()}"
-        elif typ == "py":
-            exec(cmd, {}, {})
-            return f"[OK] Node {node_id} (python) -> Completed"
-        else:
-            raise ValueError(f"Unknown action type: {typ}")
-    except sp.CalledProcessError as e:
-        raise RuntimeError(f"Command failed for node {node_id}: {e.stderr or str(e)}")
-    except Exception as e:
-        raise RuntimeError(f"Execution error in node {node_id}: {e}")
 
 def load_graph(path: str, messageQueue: Queue):
     global globalGraph
@@ -691,6 +554,7 @@ def load_graph(path: str, messageQueue: Queue):
         f"[OK] Graph loaded from {path} with {len(globalGraph.nodes)} nodes."
     )
     messageQueue.put(None)
+
 
 def handle_command(command: str, messageQueue: Queue):
     global globalGraph, rafThreadPool
@@ -761,7 +625,7 @@ def handle_command(command: str, messageQueue: Queue):
                 messageQueue.put("An active build is running. Performing cancel first.")
                 rafThreadPool.terminate()
                 rafThreadPool = RafThreadPool(4)
-                #rafThreadPool = MyProcessPool(4)
+                # rafThreadPool = MyProcessPool(4)
             rafThreadPool.close()
             rafThreadPool.join()
             messageQueue.put("Closing thread pool and exiting program.")
@@ -774,6 +638,7 @@ def handle_command(command: str, messageQueue: Queue):
 
     if not command.startswith("build "):
         messageQueue.put(None)
+
 
 def main():
     global globalGraph, rafThreadPool
@@ -829,6 +694,7 @@ def main():
             break
         except Exception as e:
             print(f"Exception occurred: {e}")
+
 
 if __name__ == "__main__":
     main()
