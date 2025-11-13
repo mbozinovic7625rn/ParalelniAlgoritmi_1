@@ -15,7 +15,7 @@ Nije uradjeno:
 
 Pitanja za AI:
 
-- Napravi mi primere dag fajlova koji sadrže i fail i ispituju Planera
-- Da li je potreban lock u Graf klasi (pozitivan odgovor)
-- Da li je moguće uraditi Future klasu preko semafora ili condition-a? (Odgovor je bio pozitivan. Za semafore je overkill dok je za condition-e moguće uraditi)
-- Kako izvršiti shell i py proces iz naše akcije u python skripti? (Odgovor je bio preko subprocess-a i exec funkcije)
+- Napravi mi primere dag fajlova koji sadrže i fail i ispituju Planera i RafThreadPool,
+- Da li je potreban lock u Graf klasi (pozitivan odgovor),
+- Da li je moguće uraditi Future klasu preko semafora ili condition-a? (Odgovor je bio pozitivan. Za semafore je overkill dok je za condition-e moguće uraditi),
+- Kako izvršiti shell i py proces iz naše akcije u python skripti? (Odgovor je bio preko subprocess-a i exec funkcije).
